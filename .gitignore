@@ -1,0 +1,12 @@
+.DS_Store
+.classpath
+.project
+.idea
+_
+/target/
+/lib/
+.agent/
+.vscode/
+jdk-17/
+.lock
+.*.drawio.bkp
