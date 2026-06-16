@@ -11,15 +11,12 @@ import org.tinystruct.net.URLRequest;
 import org.tinystruct.net.handlers.HTTPHandler;
 import org.tinystruct.system.ApplicationManager;
 import org.tinystruct.system.Dispatcher;
-import org.tinystruct.system.HttpServer;
 import org.tinystruct.system.annotation.Action;
 import org.tinystruct.system.annotation.Argument;
 
-import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
-import java.util.concurrent.CountDownLatch;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.tinystruct.mcp.MCPClient;
@@ -158,7 +155,7 @@ public class SmartDBA extends AbstractApplication {
         System.out.println(WHITE + "Type 'exit' or 'quit' to leave. Type 'clear' to reset history.\n" + RESET);
     }
 
-    @Action(value = "agent/interactive", description = "Start an interactive chat session", mode = Action.Mode.CLI)
+    @Action(value = "agent/chat", description = "Start an interactive chat session", mode = Action.Mode.CLI)
     public void interactive() throws ApplicationException {
         printBanner();
         java.util.Scanner scanner = new java.util.Scanner(System.in);
@@ -322,7 +319,7 @@ public class SmartDBA extends AbstractApplication {
                     }
 
                     if (hasActions) {
-                        System.out.print(CYAN + "Agent is processing results..." + RESET + "\r");
+                        System.out.print("\r" + CYAN + "Waiting for results..." + RESET + "\r");
                     }
                 } else {
                     return RED + "Error: API returned status " + response.getStatusCode() + "\n" + response.getBody() + RESET;

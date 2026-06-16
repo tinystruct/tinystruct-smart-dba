@@ -22,7 +22,7 @@
         <dependency>
             <groupId>org.tinystruct</groupId>
             <artifactId>tinystruct</artifactId>
-            <version>1.7.26</version>
+            <version>1.7.27</version>
         </dependency>
         <!-- JUnit for generated project tests -->
         <dependency>
