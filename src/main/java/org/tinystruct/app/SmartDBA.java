@@ -42,7 +42,7 @@ public class SmartDBA extends AbstractApplication {
             "- db/insert: requires params 'table', 'data'\n" +
             "- db/update: requires params 'table', 'data', 'where'\n" +
             "- db/delete: requires params 'table', 'where'\n" +
-            "- db/execute: requires param 'sql'\n" +
+            "- db/execute: requires param 'sql'. Use this for complex queries involving JOINs, subqueries, or CTEs (WITH).\n" +
             "\n" +
             "SQL DIALECT RULES (important):\n" +
             "- NEVER include a trailing semicolon in SQL passed to db/execute.\n" +
@@ -520,18 +520,22 @@ public class SmartDBA extends AbstractApplication {
     private String formatAsTable(Builders data) {
         if (data == null || data.size() == 0) return "No results.";
         
+        final int MAX_COL_WIDTH = 50;
         java.util.List<String> keys = new java.util.ArrayList<>(data.get(0).keySet());
         java.util.Map<String, Integer> columnWidths = new java.util.HashMap<>();
         
         for (String key : keys) {
-            columnWidths.put(key, key.length());
+            columnWidths.put(key, Math.min(MAX_COL_WIDTH, key.length()));
         }
         
         for (int i = 0; i < data.size(); i++) {
             Builder row = data.get(i);
             for (String key : keys) {
-                String val = String.valueOf(row.get(key));
-                columnWidths.put(key, Math.max(columnWidths.get(key), val.length()));
+                Object valObj = row.get(key);
+                String val = valObj != null ? valObj.toString() : "NULL";
+                int len = val.length();
+                if (len > MAX_COL_WIDTH) len = MAX_COL_WIDTH;
+                columnWidths.put(key, Math.max(columnWidths.get(key), len));
             }
         }
         
@@ -546,7 +550,9 @@ public class SmartDBA extends AbstractApplication {
         // Header text
         sb.append("|");
         for (String key : keys) {
-            sb.append(" ").append(String.format("%-" + columnWidths.get(key) + "s", key)).append(" |");
+            String k = key;
+            if (k.length() > MAX_COL_WIDTH) k = k.substring(0, MAX_COL_WIDTH - 3) + "...";
+            sb.append(" ").append(String.format("%-" + columnWidths.get(key) + "s", k)).append(" |");
         }
         sb.append("\n");
         
@@ -562,7 +568,11 @@ public class SmartDBA extends AbstractApplication {
             Builder row = data.get(i);
             sb.append("|");
             for (String key : keys) {
-                String val = String.valueOf(row.get(key));
+                Object valObj = row.get(key);
+                String val = valObj != null ? valObj.toString() : "NULL";
+                if (val.length() > MAX_COL_WIDTH) {
+                    val = val.substring(0, MAX_COL_WIDTH - 3) + "...";
+                }
                 sb.append(" ").append(String.format("%-" + columnWidths.get(key) + "s", val)).append(" |");
             }
             sb.append("\n");

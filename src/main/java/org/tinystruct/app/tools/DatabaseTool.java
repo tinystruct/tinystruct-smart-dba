@@ -513,7 +513,7 @@ public class DatabaseTool extends MCPTool {
      */
     @Action(
             value = "db/execute",
-            description = "Execute arbitrary SQL. Returns rows for SELECT/SHOW/DESCRIBE/EXPLAIN, affected rows otherwise.",
+            description = "Execute arbitrary SQL. Returns rows for SELECT/SHOW/DESCRIBE/EXPLAIN/WITH/VALUES, affected rows otherwise.",
             arguments = {
                     @Argument(key = "sql", description = "The raw SQL statement to execute", type = "string")
             }
@@ -529,8 +529,13 @@ public class DatabaseTool extends MCPTool {
             operator.disableSafeCheck();
 
             String upper = sql.toUpperCase(Locale.ROOT);
-            if (upper.startsWith("SELECT") || upper.startsWith("SHOW")
-                    || upper.startsWith("DESCRIBE") || upper.startsWith("EXPLAIN")) {
+            // Robust check for statements that return ResultSets.
+            // Includes CTEs (WITH), EXPLAIN, and vendor-specific SHOW/PRAGMA.
+            if (upper.startsWith("SELECT") || upper.startsWith("WITH") || 
+                upper.startsWith("SHOW") || upper.startsWith("DESCRIBE") || 
+                upper.startsWith("EXPLAIN") || upper.startsWith("VALUES") ||
+                upper.startsWith("PRAGMA") || upper.startsWith("HELP")) {
+                
                 ResultSet rs = operator.query(sql);
                 Builders rows;
                 try {
@@ -626,21 +631,6 @@ public class DatabaseTool extends MCPTool {
             throw new MCPException("SQL identifier '" + name + "' contains no valid characters.");
         }
         return safe;
-    }
-
-    /**
-     * Parses a JSON string into a {@link Builder}.
-     *
-     * @throws MCPException if the string is not valid JSON.
-     */
-    private static Builder parseJson(String json) throws MCPException {
-        Builder b = new Builder();
-        try {
-            b.parse(json);
-        } catch (ApplicationException e) {
-            throw new MCPException("Invalid JSON: " + e.getMessage(), e);
-        }
-        return b;
     }
 
     /**
