@@ -6,16 +6,20 @@ import org.tinystruct.ApplicationException;
 import org.tinystruct.data.component.Builder;
 import org.tinystruct.data.component.Builders;
 import org.tinystruct.http.SSEPushManager;
+import org.tinystruct.mcp.MCPSpecification;
 import org.tinystruct.net.URLRequest;
 import org.tinystruct.net.handlers.HTTPHandler;
 import org.tinystruct.system.ApplicationManager;
+import org.tinystruct.system.Dispatcher;
 import org.tinystruct.system.HttpServer;
 import org.tinystruct.system.annotation.Action;
 import org.tinystruct.system.annotation.Argument;
 
+import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
+import java.util.concurrent.CountDownLatch;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.tinystruct.mcp.MCPClient;
@@ -34,14 +38,25 @@ public class SmartDBA extends AbstractApplication {
     private MCPClient mcpClient;
     private static final String HISTORY_FILE = ".agent_history.json";
     
-    private static final String SYSTEM_PROMPT = "You are SmartDBA, an autonomous database agent. You have access to the following MCP database tools:\n" +
-            "- list-tables\n" +
-            "- describe: requires param 'table'\n" +
-            "- query: requires params 'table', 'where', optional 'limit'\n" +
-            "- insert: requires params 'table', 'data'\n" +
-            "- update: requires params 'table', 'data', 'where'\n" +
-            "- delete: requires params 'table', 'where'\n" +
-            "- execute: requires param 'sql'\n" +
+    private static final String SYSTEM_PROMPT = "You are SmartDBA, an autonomous database agent. You need display data as table style. You have access to the following MCP database tools:\n" +
+            "- db/list-tables\n" +
+            "- db/describe: requires param 'table'\n" +
+            "- db/query: requires params 'table', 'where', optional 'limit'\n" +
+            "- db/insert: requires params 'table', 'data'\n" +
+            "- db/update: requires params 'table', 'data', 'where'\n" +
+            "- db/delete: requires params 'table', 'where'\n" +
+            "- db/execute: requires param 'sql'\n" +
+            "\n" +
+            "SQL DIALECT RULES (important):\n" +
+            "- NEVER include a trailing semicolon in SQL passed to db/execute.\n" +
+            "- When using H2 database, the following words are reserved and MUST be double-quoted\n" +
+            "  as identifiers whenever used as table or column names:\n" +
+            "  USER, GROUP, ORDER, VALUE, KEY, INDEX, SCHEMA, CATALOG, ROLE, CONSTRAINT,\n" +
+            "  CROSS, CURRENT, DISTINCT, EXCEPT, EXISTS, FETCH, FOR, FOREIGN, FROM, FULL,\n" +
+            "  HAVING, INNER, INTERSECT, IS, JOIN, LIKE, LIMIT, MINUS, NATURAL, NOT,\n" +
+            "  NULL, OFFSET, ON, ORDER, PRIMARY, RIGHT, ROWNUM, SELECT, SYSDATE, SYSTIME,\n" +
+            "  SYSTIMESTAMP, TODAY, TOP, TRUE, UNION, WHERE, WITH.\n" +
+            "  Example: SELECT COUNT(*) FROM \"user\" -- not FROM user\n" +
             "\n" +
             "To use these tools, you MUST output a JSON block at the end of your response in this format:\n" +
             "```json\n" +
@@ -53,11 +68,20 @@ public class SmartDBA extends AbstractApplication {
 
     // ANSI Color codes
     private static final String RESET = "\u001b[0m";
-    private static final String KEYWORD = "\u001b[35m"; // Magenta
-    private static final String STRING = "\u001b[32m";  // Green
-    private static final String COMMENT = "\u001b[36m"; // Cyan
-    private static final String NUMBER = "\u001b[33m";  // Yellow
-    private static final String CLASS = "\u001b[34m";   // Blue
+    private static final String BOLD = "\u001b[1m";
+    private static final String RED = "\u001b[31m";
+    private static final String GREEN = "\u001b[32m";
+    private static final String YELLOW = "\u001b[33m";
+    private static final String BLUE = "\u001b[34m";
+    private static final String MAGENTA = "\u001b[35m";
+    private static final String CYAN = "\u001b[36m";
+    private static final String WHITE = "\u001b[37m";
+
+    private static final String KEYWORD = MAGENTA;
+    private static final String STRING = GREEN;
+    private static final String COMMENT = CYAN;
+    private static final String NUMBER = YELLOW;
+    private static final String CLASS = BLUE;
 
     @Override
     public void init() {
@@ -68,15 +92,17 @@ public class SmartDBA extends AbstractApplication {
             this.apiUrl = DEFAULT_GEMINI_API_URL;
         }
 
+        ApplicationManager.install(new Dispatcher());
         ApplicationManager.install(new SmartDBAServer());
-        ApplicationManager.install(new HttpServer());
-        new Thread(() -> {
-        try {
-            ApplicationManager.call("start", new ApplicationContext(), Action.Mode.CLI);
-        } catch (ApplicationException e) {
-            logger.log(Level.WARNING, "Error starting SmartDBA", e);
-            throw new RuntimeException(e);
-        }}).start();
+        Thread thread = new Thread(() -> {
+            try {
+                ApplicationManager.call("start", new ApplicationContext(), Action.Mode.CLI);
+            } catch (ApplicationException e) {
+                logger.log(Level.WARNING, "Error starting SmartDBA", e);
+                throw new RuntimeException(e);
+            }
+        });
+        thread.start();
 
         String skillFile = this.getConfiguration().get("agent.skill_file");
         if (skillFile != null && !skillFile.isEmpty()) {
@@ -89,18 +115,16 @@ public class SmartDBA extends AbstractApplication {
                 logger.warning("Could not load skill file: " + e.getMessage());
             }
         }
-        
+
         String mcpUrl = this.getConfiguration().get("mcp.server.url");
         if (mcpUrl == null || mcpUrl.isEmpty()) {
             mcpUrl = "http://localhost:8080/";
         }
         String mcpToken = this.getConfiguration().get("mcp.auth.token");
+        // MCPClient is created here but NOT connected — the HTTP server
+        // starts on a background thread after init() returns, so connecting
+        // eagerly would always fail. The client connects lazily on first use.
         this.mcpClient = new MCPClient(mcpUrl, mcpToken);
-        try {
-            this.mcpClient.connect();
-        } catch (java.io.IOException e) {
-            logger.warning("Failed to connect to MCP: " + e.getMessage());
-        }
     }
 
     @Override
@@ -124,22 +148,39 @@ public class SmartDBA extends AbstractApplication {
         return internalChat(message);
     }
 
+    private void printBanner() {
+        System.out.println(CYAN + BOLD + "╔═══════════════════════════════════════════════════════════════╗" + RESET);
+        System.out.println(CYAN + BOLD + "║                                                               ║" + RESET);
+        System.out.println(CYAN + BOLD + "║   " + WHITE + "SmartDBA - Autonomous Database Agent" + CYAN + "                        ║" + RESET);
+        System.out.println(CYAN + BOLD + "║   " + YELLOW + "Version " + version() + CYAN + "                                               ║" + RESET);
+        System.out.println(CYAN + BOLD + "║                                                               ║" + RESET);
+        System.out.println(CYAN + BOLD + "╚═══════════════════════════════════════════════════════════════╝" + RESET);
+        System.out.println(WHITE + "Type 'exit' or 'quit' to leave. Type 'clear' to reset history.\n" + RESET);
+    }
+
     @Action(value = "agent/interactive", description = "Start an interactive chat session", mode = Action.Mode.CLI)
     public void interactive() throws ApplicationException {
-        System.out.println("Starting interactive Agent session. Type 'exit' or 'quit' to leave.");
+        printBanner();
         java.util.Scanner scanner = new java.util.Scanner(System.in);
         while (true) {
-            System.out.print("You > ");
+            System.out.print(BLUE + BOLD + "You > " + RESET);
             if (!scanner.hasNextLine()) break;
             String input = scanner.nextLine().trim();
             if (input.equalsIgnoreCase("exit") || input.equalsIgnoreCase("quit")) {
-                System.out.println("Goodbye!");
+                System.out.println(YELLOW + "Goodbye!" + RESET);
+                System.exit(0);
                 break;
+            }
+            if (input.equalsIgnoreCase("clear")) {
+                System.out.println(clear());
+                continue;
             }
             if (input.isEmpty()) continue;
 
+            System.out.print(CYAN + "Agent is thinking..." + RESET + "\r");
             String response = internalChat(input);
-            System.out.println("\nAgent > " + response + "\n");
+            System.out.print("                     \r"); // Clear thinking message
+            System.out.println("\n" + GREEN + BOLD + "Agent > " + RESET + response + "\n");
         }
     }
 
@@ -161,6 +202,21 @@ public class SmartDBA extends AbstractApplication {
             lastEnd = matcher.end();
         }
         sb.append(text.substring(lastEnd));
+        
+        // Also highlight JSON blocks if they are actions
+        pattern = java.util.regex.Pattern.compile("```json(.*?)```", java.util.regex.Pattern.DOTALL);
+        matcher = pattern.matcher(sb.toString());
+        String result = sb.toString();
+        sb = new StringBuilder();
+        lastEnd = 0;
+        while (matcher.find()) {
+            sb.append(result, lastEnd, matcher.start());
+            String code = matcher.group(1);
+            sb.append("```json").append(YELLOW + code + RESET).append("```");
+            lastEnd = matcher.end();
+        }
+        sb.append(result.substring(lastEnd));
+
         return sb.toString();
     }
 
@@ -171,7 +227,7 @@ public class SmartDBA extends AbstractApplication {
         StringBuilder sb = new StringBuilder();
         String[] lines = code.split("\n");
         for (int i = 0; i < lines.length; i++) {
-            sb.append(String.format("%3d: ", i + 1)).append(lines[i]).append("\n");
+            sb.append(String.format(WHITE + "%3d: " + RESET, i + 1)).append(lines[i]).append("\n");
         }
         code = sb.toString();
 
@@ -194,83 +250,98 @@ public class SmartDBA extends AbstractApplication {
 
     private String internalChat(String message) throws ApplicationException {
         if (this.apiKey == null || this.apiKey.isEmpty()) {
-            return "Error: API key not configured. Please set 'agent.api_key' in application.properties.";
+            return RED + "Error: API key not configured. Please set 'agent.api_key' in application.properties." + RESET;
         }
 
         // 1. Load history
         Builders history = loadHistory();
         
         // Add user message
-        Builder userMsg = new Builder();
-        userMsg.put("role", "user");
-        userMsg.put("content", message);
-        history.add(userMsg);
+        if (message != null && !message.isEmpty()) {
+            Builder userMsg = new Builder();
+            userMsg.put("role", "user");
+            userMsg.put("content", message);
+            history.add(userMsg);
+        }
 
-        // 2. Call the API
-        try {
-            boolean isGemini = this.apiUrl.contains("generativelanguage.googleapis.com");
-            URL url;
-            Builder payload;
-            if (isGemini) {
-                url = URI.create(this.apiUrl + "?key=" + this.apiKey).toURL();
-                payload = prepareGeminiPayload(history);
-            } else {
-                url = URI.create(this.apiUrl).toURL();
-                payload = prepareOpenAIPayload(history);
-            }
+        StringBuilder finalResponse = new StringBuilder();
+        boolean hasActions = true;
 
-            URLRequest request = new URLRequest(url);
-            request.setMethod("POST")
-                    .setHeader("Content-Type", "application/json");
-            
-            if (!isGemini) {
-                request.setHeader("Authorization", "Bearer " + this.apiKey);
-            }
-            
-            request.setBody(payload.toString());
-
-            HTTPHandler handler = new HTTPHandler();
-            var response = handler.handleRequest(request);
-
-            if (response.getStatusCode() == 200) {
-                Builder result = new Builder();
-                result.parse(response.getBody());
-                
-                String responseText;
+        while (hasActions) {
+            // 2. Call the API
+            try {
+                boolean isGemini = this.apiUrl.contains("generativelanguage.googleapis.com");
+                URL url;
+                Builder payload;
                 if (isGemini) {
-                    responseText = parseGeminiResponse(result);
+                    url = URI.create(this.apiUrl + "?key=" + this.apiKey).toURL();
+                    payload = prepareGeminiPayload(history);
                 } else {
-                    responseText = parseOpenAIResponse(result);
+                    url = URI.create(this.apiUrl).toURL();
+                    payload = prepareOpenAIPayload(history);
                 }
 
-                // Add assistant response to history
-                Builder assistantMsg = new Builder();
-                assistantMsg.put("role", "assistant");
-                assistantMsg.put("content", responseText);
-                history.add(assistantMsg);
+                URLRequest request = new URLRequest(url);
+                request.setMethod("POST")
+                        .setHeader("Content-Type", "application/json");
                 
-                // Save history
-                saveHistory(history);
+                if (!isGemini) {
+                    request.setHeader("Authorization", "Bearer " + this.apiKey);
+                }
+                
+                request.setBody(payload.toString());
 
-                // 3. Parse and execute actions
-                processActions(responseText);
+                HTTPHandler handler = new HTTPHandler();
+                var response = handler.handleRequest(request);
 
-                return highlight(responseText);
-            } else {
-                return "Error: API returned status " + response.getStatusCode() + "\n" + response.getBody();
+                if (response.getStatusCode() == 200) {
+                    Builder result = new Builder();
+                    result.parse(response.getBody());
+                    
+                    String responseText;
+                    if (isGemini) {
+                        responseText = parseGeminiResponse(result);
+                    } else {
+                        responseText = parseOpenAIResponse(result);
+                    }
+
+                    // Add assistant response to history
+                    Builder assistantMsg = new Builder();
+                    assistantMsg.put("role", "assistant");
+                    assistantMsg.put("content", responseText);
+                    history.add(assistantMsg);
+                    
+                    // Process any actions requested by the AI
+                    hasActions = processActions(responseText, history);
+                    saveHistory(history);
+                    
+                    String textWithoutJson = responseText.replaceAll("```json[\\s\\S]*?```", "").trim();
+                    if (!textWithoutJson.isEmpty()) {
+                        if (finalResponse.length() > 0) finalResponse.append("\n\n");
+                        finalResponse.append(textWithoutJson);
+                    }
+
+                    if (hasActions) {
+                        System.out.print(CYAN + "Agent is processing results..." + RESET + "\r");
+                    }
+                } else {
+                    return RED + "Error: API returned status " + response.getStatusCode() + "\n" + response.getBody() + RESET;
+                }
+            } catch (MalformedURLException e) {
+                throw new ApplicationException("Invalid API URL: " + this.apiUrl, e);
             }
-        } catch (MalformedURLException e) {
-            throw new ApplicationException("Invalid API URL: " + this.apiUrl, e);
         }
+        
+        return highlight(finalResponse.toString());
     }
 
     @Action(value = "agent/clear", description = "Clear chat history")
     public String clear() {
         try {
             java.nio.file.Files.deleteIfExists(java.nio.file.Paths.get(HISTORY_FILE));
-            return "History cleared.";
+            return GREEN + "History cleared." + RESET;
         } catch (java.io.IOException e) {
-            return "Error clearing history: " + e.getMessage();
+            return RED + "Error clearing history: " + e.getMessage() + RESET;
         }
     }
 
@@ -367,7 +438,8 @@ public class SmartDBA extends AbstractApplication {
         return "Error: No response from OpenAI.";
     }
 
-    private void processActions(String responseText) {
+    private boolean processActions(String responseText, Builders history) {
+        boolean executedAny = false;
         if (responseText.contains("```json")) {
             try {
                 String jsonPart = responseText.substring(responseText.indexOf("```json") + 7);
@@ -394,10 +466,45 @@ public class SmartDBA extends AbstractApplication {
                             case "mcp":
                                 String toolName = action.get("tool").toString();
                                 Builder params = action.get("params") != null ? (Builder) action.get("params") : new Builder();
-                                System.out.println("\n[System] Executing MCP tool: " + toolName + " with params: " + params.toString());
+                                System.out.println("\n" + MAGENTA + BOLD + "[System] Executing MCP tool: " + RESET + CYAN + toolName + RESET + " with params: " + YELLOW + params.toString() + RESET);
+                                MCPSpecification.SessionState state = this.mcpClient.getSessionState();
+                                if (state == null
+                                        || state == MCPSpecification.SessionState.ERROR
+                                        || state == MCPSpecification.SessionState.DISCONNECTED) {
+                                    this.mcpClient.connect();
+                                }
                                 Object mcpResult = this.mcpClient.callTool(toolName, params);
-                                System.out.println("[System] MCP Tool result: " + mcpResult + "\n");
+                                
+                                String formattedResult;
+                                if (mcpResult != null && mcpResult.toString().startsWith("{")) {
+                                    try {
+                                        Builder resultObj = new Builder();
+                                        resultObj.parse(mcpResult.toString());
+                                        if (resultObj.get("tables") instanceof Builders) {
+                                            formattedResult = formatAsTable((Builders) resultObj.get("tables"));
+                                        } else if (resultObj.get("rows") instanceof Builders) {
+                                            formattedResult = formatAsTable((Builders) resultObj.get("rows"));
+                                        } else if (resultObj.get("columns") instanceof Builders) {
+                                            formattedResult = formatAsTable((Builders) resultObj.get("columns"));
+                                        } else {
+                                            formattedResult = mcpResult.toString();
+                                        }
+                                    } catch (Exception e) {
+                                        formattedResult = mcpResult.toString();
+                                    }
+                                } else {
+                                    formattedResult = String.valueOf(mcpResult);
+                                }
+                                
+                                System.out.println(MAGENTA + BOLD + "[System] MCP Tool result:" + RESET);
+                                System.out.println(GREEN + formattedResult + RESET + "\n");
                                 push("MCP Tool " + toolName + " executed. Result: " + mcpResult);
+                                
+                                Builder toolResultMsg = new Builder();
+                                toolResultMsg.put("role", "user");
+                                toolResultMsg.put("content", "MCP Tool " + toolName + " executed. Result: " + formattedResult);
+                                history.add(toolResultMsg);
+                                executedAny = true;
                                 break;
                             default:
                                 logger.warning("Unknown action type: " + type);
@@ -410,7 +517,69 @@ public class SmartDBA extends AbstractApplication {
                 logger.log(Level.WARNING, "Failed to parse actions from response: " + e.getMessage());
             }
         }
+        return executedAny;
     }
+
+    private String formatAsTable(Builders data) {
+        if (data == null || data.size() == 0) return "No results.";
+        
+        java.util.List<String> keys = new java.util.ArrayList<>(data.get(0).keySet());
+        java.util.Map<String, Integer> columnWidths = new java.util.HashMap<>();
+        
+        for (String key : keys) {
+            columnWidths.put(key, key.length());
+        }
+        
+        for (int i = 0; i < data.size(); i++) {
+            Builder row = data.get(i);
+            for (String key : keys) {
+                String val = String.valueOf(row.get(key));
+                columnWidths.put(key, Math.max(columnWidths.get(key), val.length()));
+            }
+        }
+        
+        StringBuilder sb = new StringBuilder();
+        // Header line
+        sb.append("+");
+        for (String key : keys) {
+            sb.append("-".repeat(columnWidths.get(key) + 2)).append("+");
+        }
+        sb.append("\n");
+        
+        // Header text
+        sb.append("|");
+        for (String key : keys) {
+            sb.append(" ").append(String.format("%-" + columnWidths.get(key) + "s", key)).append(" |");
+        }
+        sb.append("\n");
+        
+        // Separator
+        sb.append("+");
+        for (String key : keys) {
+            sb.append("-".repeat(columnWidths.get(key) + 2)).append("+");
+        }
+        sb.append("\n");
+        
+        // Rows
+        for (int i = 0; i < data.size(); i++) {
+            Builder row = data.get(i);
+            sb.append("|");
+            for (String key : keys) {
+                String val = String.valueOf(row.get(key));
+                sb.append(" ").append(String.format("%-" + columnWidths.get(key) + "s", val)).append(" |");
+            }
+            sb.append("\n");
+        }
+        
+        // Bottom line
+        sb.append("+");
+        for (String key : keys) {
+            sb.append("-".repeat(columnWidths.get(key) + 2)).append("+");
+        }
+        
+        return sb.toString();
+    }
+
 
     private String parseGeminiResponse(Builder result) throws ApplicationException {
         // Gemini response format: {"candidates": [{"content": {"parts": [{"text": "..."}]}}]}
