@@ -157,6 +157,13 @@ public class SmartDBA extends AbstractApplication {
 
     @Action(value = "agent/chat", description = "Start an interactive chat session", mode = Action.Mode.CLI)
     public void interactive() throws ApplicationException {
+        try {
+            // Wait a moment for the server startup output to finish
+            Thread.sleep(1500);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
         printBanner();
         java.util.Scanner scanner = new java.util.Scanner(System.in);
         while (true) {
