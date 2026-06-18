@@ -50,7 +50,7 @@ SmartDBA is an autonomous database agent built on the [tinystruct](https://githu
 ### Start Interactive Session
 The most common way to use SmartDBA is through its interactive CLI mode:
 ```bash
-bin/dispatcher agent/interactive
+bin/dispatcher agent/chat
 ```
 
 ### Commands in Interactive Mode
