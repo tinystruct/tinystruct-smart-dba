@@ -130,7 +130,7 @@ public class SmartDBA extends AbstractApplication {
         return "1.0.0";
     }
 
-    @Action(value = "agent/chat", description = "Chat with the agent", options = {
+    @Action(value = "chat", description = "Chat with the agent", options = {
             @Argument(key = "message", description = "Message to the agent")
     })
     public String chat() throws ApplicationException {
@@ -158,7 +158,7 @@ public class SmartDBA extends AbstractApplication {
         System.out.println(WHITE + "Type 'exit' or 'quit' to leave. Type 'clear' to reset history.\n" + RESET);
     }
 
-    @Action(value = "agent/chat", description = "Start an interactive chat session", mode = Action.Mode.CLI)
+    @Action(value = "chat", description = "Start an interactive chat session", mode = Action.Mode.CLI)
     public void interactive() throws ApplicationException {
         try {
             // Wait a moment for the server startup output to finish
@@ -603,7 +603,7 @@ public class SmartDBA extends AbstractApplication {
         return "";
     }
 
-    @Action(value = "agent/clear", description = "Clear chat history")
+    @Action(value = "clear", description = "Clear chat history")
     public String clear() {
         try {
             java.nio.file.Files.deleteIfExists(java.nio.file.Paths.get(HISTORY_FILE));
