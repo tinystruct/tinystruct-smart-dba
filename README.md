@@ -1,85 +1,107 @@
-# SmartDBA - Autonomous Database Agent
+# SmartDBA - AI Database Agent
 
-SmartDBA is an autonomous database agent built on the [tinystruct](https://github.com/tinystruct/tinystruct) framework. It combines a powerful Large Language Model (LLM) with a Model Context Protocol (MCP) server to provide a friendly CLI interface for database management and exploration.
+SmartDBA is an AI database agent built on the [tinystruct](https://github.com/tinystruct/tinystruct) framework (1.7.35). Ask questions in plain English ("show me the ten newest orders"); the agent works out the SQL, runs it through a set of MCP database tools, and shows the results as formatted tables in your terminal.
 
 ## Features
 
-- **Interactive CLI**: A polished command-line interface with ANSI colors, banners, and real-time "thinking" indicators.
-- **Autonomous Database Operations**: The agent can list tables, describe schemas, query data, and perform DML operations (Insert, Update, Delete) based on natural language instructions.
-- **Complex SQL Support**: Supports JOINs, subqueries, and Common Table Expressions (CTEs/`WITH`) via a robust execution tool.
-- **Table-Style Display**: Results from database queries are automatically formatted into clean, readable ASCII tables with intelligent column truncation.
-- **Syntax Highlighting**: Built-in highlighting for Java code blocks and JSON actions in agent responses.
-- **MCP Integration**: Uses the Model Context Protocol to bridge the LLM with local database tools.
+- **Interactive CLI**: Streams the model's reply live and renders Markdown (headings, lists, code blocks, tables) with ANSI colors.
+- **Database tools over MCP**: List tables, describe schemas, query, insert, update, delete, and run raw SQL (JOINs, subqueries, CTEs).
+- **Any JDBC database**: MySQL/MariaDB, SQLite, H2, SQL Server and other JDBC drivers. Schema discovery uses JDBC metadata, and identifier quoting adapts to the dialect.
+- **Gemini or OpenAI-compatible LLMs**: Defaults to Gemini (`gemini-3.5-flash-lite`).
+- **HTTP + SSE**: The same `chat` action is available over HTTP, with token-by-token updates pushed over Server-Sent Events.
+- **Conversation memory**: History is kept between turns in `.agent_history.json`; an optional skill file adds extra guidance for the model.
+
+## Safety model
+
+The model's output is treated as untrusted input.
+
+- **Writes need approval.** `db/insert`, `db/update` and `db/delete` (the `typesafe.routing.confirm-actions` list), file writes and shell commands all ask `[y/N]` in the terminal.
+- **Raw SQL is classified first.** `db/execute` runs without a prompt only when the statement is provably read-only (no stacked statements, comments, or write keywords, so `WITH ... DELETE` is caught). Anything else needs approval. If a TypeSafe key is configured, the JEV model gives an extra opinion on read-only SQL.
+- **No approver, no write.** Outside the interactive terminal (for example the HTTP `chat` action) there is nobody to approve, so writes, shell commands and modifying tool calls are refused.
+- **Confined file access.** The agent's `read` and `write` actions only touch files inside the workspace (`agent.workspace`, default: the working directory). `application.properties` and `.agent_history.json` are blocked, as are paths that escape via `..` or symlinks.
+- **Validated WHERE clauses.** `db/update` and `db/delete` require a WHERE clause, which must be a plain predicate: no subqueries, `UNION`, DML/DDL, comments, stacked statements or always-true conditions. The clause is still spliced into the SQL text, so treat approval as the real safeguard.
+
+Use a database account with only the privileges you are comfortable giving the agent.
 
 ## Prerequisites
 
-- **Java 17** or higher.
-- **Maven** 3.6 or higher.
-- A JDBC-compliant database (MySQL, SQLite, H2, PostgreSQL, MS SQL Server, etc.).
-- An OpenAI or Google Gemini API Key.
+- Java 17 or higher
+- Maven 3.6+ (or use the bundled `mvnw`)
+- A JDBC database and its driver on the classpath
+- A Google Gemini or OpenAI-compatible API key
 
 ## Setup
 
-1. **Clone the repository**:
+1. **Clone**:
    ```bash
-   git clone <repository-url>
-   cd smartdba
+   git clone https://github.com/tinystruct/tinystruct-smart-dba.git
+   cd tinystruct-smart-dba
    ```
 
-2. **Configure Application**:
-   Edit `src/main/resources/application.properties` to set your API key and database connection:
+2. **Configure** `src/main/resources/application.properties`:
    ```properties
-   # Agent Configuration
-   agent.api_key=YOUR_API_KEY_HERE
-   # Optional: agent.api_url=... (Defaults to Gemini)
+   # LLM
+   agent.api_key=YOUR_API_KEY
+   agent.model=gemini-3.5-flash-lite
+   # Optional: agent.api_url=...   (OpenAI-compatible endpoint; defaults to Gemini)
+   # Optional: agent.workspace=.   (root for the agent's file access)
+   # Optional: agent.skill_file=path/to/SKILL.md
 
-   # Database Configuration
+   # Database
    driver=com.mysql.cj.jdbc.Driver
    database.url=jdbc:mysql://localhost:3306/your_db
    database.user=root
    database.password=secret
-   ```
 
-3. **Build the project**:
+   # Internal MCP server. Change the token from the sample value.
+   mcp.server.url=http://localhost:8080/
+   mcp.auth.token=CHANGE_ME
+   ```
+   Add your JDBC driver as a dependency in `pom.xml` (H2 is the sample default).
+
+3. **Build**:
    ```bash
-   mvn compile
+   ./mvnw package
    ```
 
 ## Usage
 
-### Start Interactive Session
-The most common way to use SmartDBA is through its interactive CLI mode:
+### Interactive session
 ```bash
-bin/dispatcher agent/chat
+bin/dispatcher chat
 ```
+Type a request such as "Show me the top 5 users created this month". Other commands: `clear` resets the history, `exit` or `quit` leaves.
 
-### Commands in Interactive Mode
-- Type your message to the agent (e.g., "Show me the top 5 users created this month").
-- `clear`: Clears the chat history.
-- `exit` or `quit`: Ends the session.
-
-### Direct Chat
-You can also send a single message from the command line:
+### Single message
 ```bash
-bin/dispatcher agent/chat --message "List all tables"
+bin/dispatcher chat --message "List all tables"
 ```
+Single messages cannot ask for approval, so anything that would modify data is refused. Use the interactive session for writes.
 
-## Available Tools (MCP)
+## Tools exposed over MCP
 
-The agent has access to the following specialized tools:
-- `db/list-tables`: Lists all tables in the connected database.
-- `db/describe`: Describes the columns and types of a specific table.
-- `db/query`: Selects rows with optional WHERE and LIMIT clauses.
-- `db/insert`/`db/update`/`db/delete`: Standard DML operations.
-- `db/execute`: Execute arbitrary SQL (JOINs, CTEs, etc.).
+| Tool | Purpose |
+|---|---|
+| `db/list-tables` | List tables and views |
+| `db/describe` | Columns, types, keys of a table |
+| `db/query` | Select rows with optional WHERE and LIMIT (max 1000) |
+| `db/insert` | Insert a row (parameterized) |
+| `db/update` | Update rows (WHERE required) |
+| `db/delete` | Delete rows (WHERE required) |
+| `db/execute` | Raw SQL for JOINs, CTEs, DDL |
 
-## Development
+## Project layout
 
-SmartDBA is modular and can be extended:
-- `SmartDBA.java`: Main agent logic and CLI interface.
-- `DatabaseTool.java`: Implementation of MCP database tools.
-- `SmartDBAServer.java`: MCP server registration.
+- `SmartDBA.java`: chat loop, LLM streaming, Markdown renderer, approval logic.
+- `SmartDBAServer.java`: MCP server that registers the database tools.
+- `tools/DatabaseTool.java`: the MCP database tools, SQL classifier and WHERE validation.
+
+## Testing
+
+```bash
+./mvnw test
+```
 
 ## License
 
-Distributed under the Apache License, Version 2.0. See `bin/README.md` for details.
+Apache License 2.0. See [LICENSE](LICENSE).
