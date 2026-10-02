@@ -72,7 +72,7 @@ agent.api_key=$_GEMINI_API_KEY        # or paste the key directly
 agent.model=gemini-3.5-flash-lite
 # agent.api_url=...                   # OpenAI-compatible endpoint; defaults to Gemini
 # agent.workspace=.                   # root for the agent's file access
-# agent.skill_file=path/to/SKILL.md   # extra guidance for the model
+# agent.skill_file=path/to/SKILL.md   # extra guidance for the model (empty by default)
 
 # Database (sample default: embedded H2 in your home directory)
 driver=org.h2.Driver
@@ -95,6 +95,25 @@ database.password=secret
 ```
 
 To use an OpenAI-compatible API, set `agent.api_url` (for example `https://api.openai.com/v1/chat/completions`), `agent.model` and `agent.api_key`.
+
+### Approval rules (TypeSafe settings)
+
+```properties
+typesafe.routing.confirm-actions=db/insert,db/update,db/delete
+typesafe.api-key=$_TYPESAFE_API_KEY
+```
+
+- `typesafe.routing.confirm-actions` is the list of tools that always ask for approval. Add `db/execute` or any other tool to be stricter; removing entries is not recommended.
+- `typesafe.api-key` (environment variable `TYPESAFE_API_KEY`) is optional. With it, a TypeSafe JEV model also reviews read-only `db/execute` SQL as a second opinion. Without it, SmartDBA relies on its built-in read-only check, so everything works either way.
+- The other `typesafe.*` keys in the sample file (endpoint, model, confidence thresholds, cache, workflow) belong to the TypeSafe integration and can be left at their defaults.
+
+### Logging
+
+`logging.enabled=FALSE` is the default, which hides framework warnings and errors. Set it to `TRUE` when something misbehaves and the terminal shows nothing useful.
+
+### Ports
+
+The embedded HTTP/MCP server starts on tinystruct's default port, 8080, and `mcp.server.url` must point at it. The agent starts it itself, so you do not run a separate server.
 
 ## Usage
 
@@ -121,7 +140,7 @@ With the app running, the same `chat` action is reachable through tinystruct's H
 | `API returned status 400 ... API key not valid` | The key is wrong or for a different API; check `agent.model` and `agent.api_url` too. |
 | `ClassNotFoundException: org.tinystruct.system.Dispatcher` | Run `./mvnw package -DskipTests` first so `lib/` is populated, and run the dispatcher from the project root. On Windows use `bin\dispatcher.cmd`, not the bash script. |
 | Driver or `database.url` errors | Make sure the JDBC driver is in `pom.xml` and `lib/`. |
-| Port 8080 already in use | Change the port in `application.properties` (`server.port`) and `mcp.server.url`. |
+| Port 8080 already in use | Set `server.port` in `application.properties` and update `mcp.server.url` to match. |
 
 ## Tools exposed over MCP
 
