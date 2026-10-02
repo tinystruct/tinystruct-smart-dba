@@ -193,6 +193,21 @@ public class SmartDBA extends AbstractApplication {
             Thread.currentThread().interrupt();
         }
 
+        // On the CLI this overload wins over chat(), so --message has to be honoured here:
+        // answer once and exit instead of dropping into the interactive prompt.
+        Object oneShot = getContext().getAttribute("--message");
+        if (oneShot != null && !oneShot.toString().isBlank()) {
+            try {
+                internalChat(oneShot.toString().trim(), true);
+                System.out.println();
+            } catch (ApplicationException e) {
+                System.out.println(RED + "Request failed: " + e.getMessage() + RESET);
+                System.exit(1);
+            }
+            // The embedded HTTP/MCP server thread is not a daemon, so exit explicitly.
+            System.exit(0);
+        }
+
         printBanner();
         java.util.Scanner scanner = new java.util.Scanner(System.in);
         while (true) {

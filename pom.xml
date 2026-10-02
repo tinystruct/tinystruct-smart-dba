@@ -36,6 +36,12 @@
             <artifactId>tinystruct-typesafe-workflow</artifactId>
             <version>1.0.0</version>
         </dependency>
+        <!-- Embedded H2 so the sample application.properties works out of the box -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <version>2.5.252</version>
+        </dependency>
         <!-- JUnit for generated project tests -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>

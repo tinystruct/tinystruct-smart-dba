@@ -30,39 +30,71 @@ Use a database account with only the privileges you are comfortable giving the a
 - A JDBC database and its driver on the classpath
 - A Google Gemini or OpenAI-compatible API key
 
-## Setup
+## Quick start
 
-1. **Clone**:
-   ```bash
-   git clone https://github.com/tinystruct/tinystruct-smart-dba.git
-   cd tinystruct-smart-dba
-   ```
+An embedded H2 database is configured by default, so you only need an API key.
 
-2. **Configure** `src/main/resources/application.properties`:
-   ```properties
-   # LLM
-   agent.api_key=YOUR_API_KEY
-   agent.model=gemini-3.5-flash-lite
-   # Optional: agent.api_url=...   (OpenAI-compatible endpoint; defaults to Gemini)
-   # Optional: agent.workspace=.   (root for the agent's file access)
-   # Optional: agent.skill_file=path/to/SKILL.md
+```bash
+git clone https://github.com/tinystruct/tinystruct-smart-dba.git
+cd tinystruct-smart-dba
+./mvnw package -DskipTests          # builds and copies dependencies into lib/
+```
 
-   # Database
-   driver=com.mysql.cj.jdbc.Driver
-   database.url=jdbc:mysql://localhost:3306/your_db
-   database.user=root
-   database.password=secret
+Set your Gemini key (the sample config reads it from the `GEMINI_API_KEY` environment variable, so nothing needs editing):
 
-   # Internal MCP server. Change the token from the sample value.
-   mcp.server.url=http://localhost:8080/
-   mcp.auth.token=CHANGE_ME
-   ```
-   Add your JDBC driver as a dependency in `pom.xml` (H2 is the sample default).
+```bash
+export GEMINI_API_KEY=your-key       # Linux / macOS
+```
+```powershell
+$env:GEMINI_API_KEY = "your-key"     # Windows PowerShell
+```
 
-3. **Build**:
-   ```bash
-   ./mvnw package
-   ```
+Run it from the project root:
+
+```bash
+bin/dispatcher chat                  # Linux / macOS
+```
+```bat
+bin\dispatcher.cmd chat              # Windows
+```
+
+Then try: `create a table of books with title and author, add three rows, and show them`. Writes will ask for your approval.
+
+On Windows, run `chcp 65001` first if the box-drawing characters look garbled.
+
+## Configuration
+
+Everything lives in `src/main/resources/application.properties`. A value written as `$_NAME` is read from the environment variable `NAME`.
+
+```properties
+# LLM
+agent.api_key=$_GEMINI_API_KEY        # or paste the key directly
+agent.model=gemini-3.5-flash-lite
+# agent.api_url=...                   # OpenAI-compatible endpoint; defaults to Gemini
+# agent.workspace=.                   # root for the agent's file access
+# agent.skill_file=path/to/SKILL.md   # extra guidance for the model
+
+# Database (sample default: embedded H2 in your home directory)
+driver=org.h2.Driver
+database.url=jdbc:h2:~/test
+database.user=
+database.password=
+
+# Internal MCP server. Change the token from the sample value.
+mcp.server.url=http://localhost:8080/
+mcp.auth.token=123456
+```
+
+**Using your own database:** put its JDBC driver in `pom.xml` (H2 is already there; `sqlite-jdbc`, MySQL and others work the same way), run `./mvnw package -DskipTests` again, and update `driver`, `database.url`, `database.user` and `database.password`. For example, MySQL:
+
+```properties
+driver=com.mysql.cj.jdbc.Driver
+database.url=jdbc:mysql://localhost:3306/your_db
+database.user=root
+database.password=secret
+```
+
+To use an OpenAI-compatible API, set `agent.api_url` (for example `https://api.openai.com/v1/chat/completions`), `agent.model` and `agent.api_key`.
 
 ## Usage
 
@@ -76,7 +108,20 @@ Type a request such as "Show me the top 5 users created this month". Other comma
 ```bash
 bin/dispatcher chat --message "List all tables"
 ```
-Single messages cannot ask for approval, so anything that would modify data is refused. Use the interactive session for writes.
+Prints the answer and exits. Single messages cannot ask for approval, so they are limited to read-only actions. Use the interactive session for anything that modifies data.
+
+### HTTP
+With the app running, the same `chat` action is reachable through tinystruct's HTTP server on port 8080, and streamed tokens are pushed over SSE. HTTP requests are read-only for the same reason.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `API key not configured` | Set `GEMINI_API_KEY` (or `agent.api_key`) in the same shell you run the dispatcher from. |
+| `API returned status 400 ... API key not valid` | The key is wrong or for a different API; check `agent.model` and `agent.api_url` too. |
+| `ClassNotFoundException: org.tinystruct.system.Dispatcher` | Run `./mvnw package -DskipTests` first so `lib/` is populated, and run the dispatcher from the project root. On Windows use `bin\dispatcher.cmd`, not the bash script. |
+| Driver or `database.url` errors | Make sure the JDBC driver is in `pom.xml` and `lib/`. |
+| Port 8080 already in use | Change the port in `application.properties` (`server.port`) and `mcp.server.url`. |
 
 ## Tools exposed over MCP
 
