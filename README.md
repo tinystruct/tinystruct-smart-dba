@@ -73,7 +73,7 @@ bin\dispatcher.cmd chat              # Windows
 
 Then try: `create a table of books with title and author, add three rows, and show them`. Writes will ask for your approval.
 
-On Windows, run `chcp 65001` first if the box-drawing characters look garbled.
+Chinese and other non-ASCII text work out of the box: the launch scripts switch the console and the JVM to UTF-8 (`chcp 65001` on Windows, `-Dfile.encoding=UTF-8`). If you start the app another way, for example from an IDE, add `-Dfile.encoding=UTF-8` to the JVM options. For a legible console font on Windows, use Windows Terminal.
 
 ## Configuration
 

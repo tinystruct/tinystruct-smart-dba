@@ -72,5 +72,9 @@ if not exist "%ROOT%\mvnw.cmd" (
 
 set "classpath=%ROOT%\target\classes;%ROOT%\lib\tinystruct-%VERSION%-jar-with-dependencies.jar;%ROOT%\lib\tinystruct-%VERSION%.jar;%ROOT%\lib\*;%ROOT%\WEB-INF\lib\*;%ROOT%\WEB-INF\classes;%USERPROFILE%\.m2\repository\org\tinystruct\tinystruct\%VERSION%\tinystruct-%VERSION%-jar-with-dependencies.jar;%USERPROFILE%\.m2\repository\org\tinystruct\tinystruct\%VERSION%\tinystruct-%VERSION%.jar"
 
+@REM Use UTF-8 end to end (console, stdin/stdout and the JVM default charset); otherwise
+@REM non-ASCII text such as Chinese is garbled on systems whose code page is GBK, etc.
+chcp 65001 >nul
+
 @REM Run Java application
-"%JAVA_CMD%" -cp "%classpath%" org.tinystruct.system.Dispatcher %*
+"%JAVA_CMD%" -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -cp "%classpath%" org.tinystruct.system.Dispatcher %*

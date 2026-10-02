@@ -209,7 +209,7 @@ public class SmartDBA extends AbstractApplication {
         }
 
         printBanner();
-        java.util.Scanner scanner = new java.util.Scanner(System.in);
+        java.util.Scanner scanner = new java.util.Scanner(System.in, java.nio.charset.StandardCharsets.UTF_8);
         while (true) {
             System.out.print(BLUE + BOLD + "You > " + RESET);
             if (!scanner.hasNextLine()) break;
@@ -921,7 +921,7 @@ public class SmartDBA extends AbstractApplication {
         System.out.print(YELLOW + "Proceed? [y/N]: " + RESET);
         System.out.flush();
         try {
-            java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(System.in));
+            java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(System.in, java.nio.charset.StandardCharsets.UTF_8));
             String answer = reader.readLine();
             return answer != null && (answer.trim().equalsIgnoreCase("y") || answer.trim().equalsIgnoreCase("yes"));
         } catch (java.io.IOException e) {
