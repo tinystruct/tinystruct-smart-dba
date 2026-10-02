@@ -2,6 +2,15 @@
   <img src="docs/banner.svg" alt="SmartDBA: ask your database in plain English" width="100%">
 </p>
 
+<p align="center">
+  <a href="https://github.com/tinystruct/tinystruct-smart-dba/releases"><img src="https://img.shields.io/github/v/release/tinystruct/tinystruct-smart-dba?color=34d399" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/tinystruct/tinystruct-smart-dba?color=38bdf8" alt="License: Apache 2.0"></a>
+  <img src="https://img.shields.io/badge/Java-17%2B-orange" alt="Java 17+">
+  <a href="https://github.com/tinystruct/tinystruct"><img src="https://img.shields.io/badge/tinystruct-1.7.35-blue" alt="tinystruct 1.7.35"></a>
+  <img src="https://img.shields.io/badge/MCP-database%20tools-8b5cf6" alt="MCP database tools">
+  <a href="https://github.com/tinystruct/tinystruct-smart-dba/stargazers"><img src="https://img.shields.io/github/stars/tinystruct/tinystruct-smart-dba?style=flat" alt="GitHub stars"></a>
+</p>
+
 # SmartDBA - AI Database Agent
 
 SmartDBA is an AI database agent built on the [tinystruct](https://github.com/tinystruct/tinystruct) framework (1.7.35). Ask questions in plain English ("show me the ten newest orders"); the agent works out the SQL, runs it through a set of MCP database tools, and shows the results as formatted tables in your terminal.
