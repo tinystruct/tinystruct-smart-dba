@@ -17,12 +17,24 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <encoding>UTF-8</encoding>
     </properties>
+
     <dependencies>
         <!-- add tinystruct dependency as a provided example; user can adjust version -->
         <dependency>
             <groupId>org.tinystruct</groupId>
             <artifactId>tinystruct</artifactId>
-            <version>1.7.27</version>
+            <version>1.7.35</version>
+        </dependency>
+        
+        <dependency>
+            <groupId>org.tinystruct</groupId>
+            <artifactId>tinystruct-typesafe-core</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.tinystruct</groupId>
+            <artifactId>tinystruct-typesafe-workflow</artifactId>
+            <version>1.0.0</version>
         </dependency>
         <!-- JUnit for generated project tests -->
         <dependency>
