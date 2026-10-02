@@ -21,9 +21,9 @@ import java.util.logging.Logger;
  *
  * <p>Extends {@link MCPTool} so that every {@code @Action}-annotated method is
  * automatically registered as an individual MCP tool by
- * {@code MCPServer.registerTool()}. Parameters are declared as explicit method
- * arguments annotated with {@code @Argument}; {@code getContext()} is never
- * used.</p>
+ * {@code MCPServer.registerTool()}, and is simultaneously registered in the
+ * tinystruct {@code ActionRegistry} so that the TypeSafe {@code DispatchPipeline}
+ * (JEV model) can route and confirm calls before execution.</p>
  *
  * <p>Supports MySQL/MariaDB, SQLite, H2, Microsoft SQL Server, and any other
  * JDBC-compliant database. All schema introspection uses JDBC
@@ -124,7 +124,8 @@ public class DatabaseTool extends MCPTool {
      */
     @Action(
             value = "db/list-tables",
-            description = "List all tables in the connected database."
+            description = "List all tables and views that exist in the connected database. " +
+                    "READ-ONLY operation — does not modify any data."
     )
     public String listTables() throws MCPException {
         Builder result = new Builder();
@@ -179,9 +180,11 @@ public class DatabaseTool extends MCPTool {
      */
     @Action(
             value = "db/describe",
-            description = "Describe the columns and types of a specific table.",
+            description = "Describe the schema of a table: column names, data types, sizes, " +
+                    "nullability, primary keys, and auto-increment flags. " +
+                    "READ-ONLY operation — does not modify any data.",
             arguments = {
-                    @Argument(key = "table", description = "The table name to describe", type = "string")
+                    @Argument(key = "table", description = "The name of the table to describe.", type = "string")
             }
     )
     public String describe(String table) throws MCPException {
@@ -256,9 +259,10 @@ public class DatabaseTool extends MCPTool {
      */
     @Action(
             value = "db/query",
-            description = "SELECT rows from a table without WHERE or LIMIT.",
+            description = "Query rows from a table. Returns up to 100 rows by default. " +
+                    "READ-ONLY operation — does not modify any data.",
             arguments = {
-                    @Argument(key = "table", description = "The table name to query", type = "string")
+                    @Argument(key = "table", description = "The name of the table to query.", type = "string")
             }
     )
     public String query(String table) throws MCPException {
@@ -267,11 +271,12 @@ public class DatabaseTool extends MCPTool {
 
     @Action(
             value = "db/query",
-            description = "SELECT rows from a table with optional WHERE and LIMIT.",
+            description = "Query rows from a table with an optional filter and row limit. " +
+                    "READ-ONLY operation — does not modify any data.",
             arguments = {
-                    @Argument(key = "table", description = "The table name to query", type = "string"),
-                    @Argument(key = "where", description = "Optional SQL WHERE clause (e.g. id=1)", type = "string"),
-                    @Argument(key = "limit", description = "Max number of rows to return (1-1000, default 100)", type = "integer")
+                    @Argument(key = "table", description = "The name of the table to query.", type = "string"),
+                    @Argument(key = "where", description = "Optional SQL WHERE clause without the WHERE keyword (e.g. id = 1 AND status = 'active').", type = "string"),
+                    @Argument(key = "limit", description = "Maximum number of rows to return (1–1000, default 100).", type = "integer")
             }
     )
     public String query(String table, String where, Integer limit) throws MCPException {
@@ -330,10 +335,11 @@ public class DatabaseTool extends MCPTool {
      */
     @Action(
             value = "db/insert",
-            description = "INSERT a row into a table.",
+            description = "Insert one or more new rows into a table. " +
+                    "WRITES DATA — this operation is persistent and irreversible without a backup.",
             arguments = {
-                    @Argument(key = "table", description = "The table name", type = "string"),
-                    @Argument(key = "data", description = "JSON object with column→value pairs", type = "object")
+                    @Argument(key = "table", description = "The name of the table to insert into.", type = "string"),
+                    @Argument(key = "data", description = "JSON object with column-value pairs to insert (e.g. {\"name\":\"Alice\",\"age\":30}).", type = "object")
             }
     )
     public String insert(String table, Builder data) throws MCPException {
@@ -392,11 +398,12 @@ public class DatabaseTool extends MCPTool {
      */
     @Action(
             value = "db/update",
-            description = "UPDATE rows in a table matching a WHERE clause.",
+            description = "Update existing rows in a table that match a filter. A WHERE clause is required. " +
+                    "WRITES DATA — modifies existing records. This operation is irreversible without a backup.",
             arguments = {
-                    @Argument(key = "table", description = "The table name", type = "string"),
-                    @Argument(key = "data", description = "JSON object with column→value pairs to set", type = "object"),
-                    @Argument(key = "where", description = "SQL WHERE clause (required for safety)", type = "string")
+                    @Argument(key = "table", description = "The name of the table to update.", type = "string"),
+                    @Argument(key = "data", description = "JSON object with column-value pairs to set (e.g. {\"status\":\"active\"}).", type = "object"),
+                    @Argument(key = "where", description = "SQL WHERE clause without the WHERE keyword — required to prevent updating all rows (e.g. id = 5).", type = "string")
             }
     )
     public String update(String table, Builder data, String where) throws MCPException {
@@ -460,10 +467,11 @@ public class DatabaseTool extends MCPTool {
      */
     @Action(
             value = "db/delete",
-            description = "DELETE rows from a table matching a WHERE clause.",
+            description = "Delete rows from a table that match a filter. A WHERE clause is required. " +
+                    "DESTRUCTIVE — permanently removes data. This operation is irreversible without a backup.",
             arguments = {
-                    @Argument(key = "table", description = "The table name", type = "string"),
-                    @Argument(key = "where", description = "SQL WHERE clause (required for safety)", type = "string")
+                    @Argument(key = "table", description = "The name of the table to delete from.", type = "string"),
+                    @Argument(key = "where", description = "SQL WHERE clause without the WHERE keyword — required to prevent deleting all rows (e.g. id = 5).", type = "string")
             }
     )
     public String delete(String table, String where) throws MCPException {
@@ -513,9 +521,13 @@ public class DatabaseTool extends MCPTool {
      */
     @Action(
             value = "db/execute",
-            description = "Execute arbitrary SQL. Returns rows for SELECT/SHOW/DESCRIBE/EXPLAIN/WITH/VALUES, affected rows otherwise.",
+            description = "Execute a raw SQL statement. " +
+                    "SELECT, WITH, SHOW, DESCRIBE, EXPLAIN, VALUES and PRAGMA are READ-ONLY. " +
+                    "INSERT, UPDATE, DELETE, DROP, TRUNCATE, ALTER, CREATE, GRANT, and REVOKE are " +
+                    "DESTRUCTIVE and irreversible without a backup. Use this only for complex queries " +
+                    "(JOINs, CTEs, subqueries) or DDL that cannot be expressed with the other tools.",
             arguments = {
-                    @Argument(key = "sql", description = "The raw SQL statement to execute", type = "string")
+                    @Argument(key = "sql", description = "The raw SQL statement to execute.", type = "string")
             }
     )
     public String execute(String sql) throws MCPException {
@@ -528,14 +540,10 @@ public class DatabaseTool extends MCPTool {
         try (DatabaseOperator operator = new DatabaseOperator()) {
             operator.disableSafeCheck();
 
-            String upper = sql.toUpperCase(Locale.ROOT);
-            // Robust check for statements that return ResultSets.
-            // Includes CTEs (WITH), EXPLAIN, and vendor-specific SHOW/PRAGMA.
-            if (upper.startsWith("SELECT") || upper.startsWith("WITH") || 
-                upper.startsWith("SHOW") || upper.startsWith("DESCRIBE") || 
-                upper.startsWith("EXPLAIN") || upper.startsWith("VALUES") ||
-                upper.startsWith("PRAGMA") || upper.startsWith("HELP")) {
-                
+            // Only statements proven read-only take the query path; anything else
+            // (including WITH ... DELETE and stacked statements) is run as an update.
+            if (isReadOnlySql(sql)) {
+
                 ResultSet rs = operator.query(sql);
                 Builders rows;
                 try {
@@ -573,6 +581,36 @@ public class DatabaseTool extends MCPTool {
     // ─────────────────────────────────────────────────────────────────────────
     // Private helpers
     // ─────────────────────────────────────────────────────────────────────────
+
+    /** Keywords that make a statement (or a fragment of one) something other than a plain read. */
+    private static final java.util.regex.Pattern WRITE_KEYWORDS = java.util.regex.Pattern.compile(
+            "\\b(INSERT|UPDATE|DELETE|MERGE|REPLACE|UPSERT|DROP|TRUNCATE|ALTER|CREATE|GRANT|REVOKE|" +
+            "CALL|EXEC|EXECUTE|COPY|ATTACH|DETACH|VACUUM|SET|INTO|LOCK|RENAME|COMMENT|ANALYZE)\\b");
+    private static final java.util.regex.Pattern READ_START = java.util.regex.Pattern.compile(
+            "^(SELECT|WITH|SHOW|DESCRIBE|EXPLAIN|VALUES|HELP)\\b");
+
+    /** Removes single-quoted string literals and double-quoted identifiers so keywords inside them are ignored. */
+    private static String stripLiterals(String sql) {
+        return sql.replaceAll("'(?:[^']|'')*'", "''").replaceAll("\"(?:[^\"]|\"\")*\"", "\"\"");
+    }
+
+    /**
+     * Conservative classifier: {@code true} only when the statement is demonstrably read-only.
+     * Anything ambiguous — stacked statements, comments, a write keyword anywhere (so
+     * {@code WITH x AS (...) DELETE ...} is caught), PRAGMA assignments — returns {@code false}.
+     * A false negative only costs an extra approval prompt; a false positive would skip one.
+     */
+    public static boolean isReadOnlySql(String sql) {
+        if (sql == null) return false;
+        String s = sql.trim();
+        if (s.endsWith(";")) s = s.substring(0, s.length() - 1).trim();
+        String code = stripLiterals(s);
+        if (code.contains(";") || code.contains("--") || code.contains("/*")) return false;
+        String upper = code.toUpperCase(Locale.ROOT);
+        if (upper.startsWith("PRAGMA")) return !upper.contains("=") && !upper.contains("(");
+        if (!READ_START.matcher(upper).find()) return false;
+        return !WRITE_KEYWORDS.matcher(upper).find();
+    }
 
     /**
      * Builds a SELECT statement with a dialect-correct row-limiting clause.
@@ -633,21 +671,40 @@ public class DatabaseTool extends MCPTool {
         return safe;
     }
 
+    private static final java.util.regex.Pattern WHERE_FORBIDDEN = java.util.regex.Pattern.compile(
+            "\\b(SELECT|UNION|INSERT|UPDATE|DELETE|MERGE|DROP|TRUNCATE|ALTER|CREATE|GRANT|REVOKE|CALL|EXEC|EXECUTE|INTO|" +
+            "SLEEP|BENCHMARK|PG_SLEEP|WAITFOR|LOAD_FILE|OUTFILE|DUMPFILE|XP_CMDSHELL)\\b");
+    private static final java.util.regex.Pattern TAUTOLOGY = java.util.regex.Pattern.compile(
+            "(^|\\bOR\\b)\\s*(TRUE|(\\d+)\\s*=\\s*\\3|(''|\"\")\\s*=\\s*(''|\"\")|('[^']*')\\s*=\\s*\\6)\\s*($|\\bOR\\b)",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+
     /**
-     * Validates a caller-supplied WHERE clause against the most common
-     * SQL-injection patterns: statement terminators, comment sequences.
-     * This is a defence-in-depth measure on top of parameterised queries.
+     * Validates a caller-supplied WHERE clause. The clause is spliced into the SQL text, so it is
+     * restricted to a plain predicate: no stacked statements, comments, subqueries, UNION, DML/DDL
+     * or time-delay functions, quotes must balance, and a trivially-true condition ({@code 1=1},
+     * {@code TRUE}, {@code OR 'a'='a'}) is refused so it cannot defeat the "WHERE is required" rule.
      *
      * @throws MCPException if a forbidden pattern is detected.
      */
     private static void validateWhereClause(String where) throws MCPException {
         if (where == null) return;
-        if (where.contains(";")) {
+        // Empty the (now placeholder) literals so any quote still present is an unterminated one.
+        String stripped = stripLiterals(where).replace("''", "").replace("\"\"", "");
+        if (stripped.contains("'") || stripped.contains("\"")) {
+            throw new MCPException("WHERE clause has unbalanced quotes.");
+        }
+        if (stripped.contains(";")) {
             throw new MCPException("WHERE clause must not contain a statement terminator (;).");
         }
-        String upper = where.toUpperCase(Locale.ROOT);
-        if (upper.contains("--") || upper.contains("/*") || upper.contains("*/")) {
+        if (stripped.contains("--") || stripped.contains("/*") || stripped.contains("*/") || stripped.contains("#")) {
             throw new MCPException("WHERE clause must not contain SQL comment sequences.");
+        }
+        if (WHERE_FORBIDDEN.matcher(stripped.toUpperCase(Locale.ROOT)).find()) {
+            throw new MCPException("WHERE clause must be a plain predicate (no subqueries, UNION, or DML/DDL keywords).");
+        }
+        // Tautology check runs on the original so 'a'='a' style literals are still visible.
+        if (TAUTOLOGY.matcher(where.trim()).find()) {
+            throw new MCPException("WHERE clause is always true; use a condition that selects specific rows.");
         }
     }
 }

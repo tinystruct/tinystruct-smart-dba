@@ -3,10 +3,12 @@ package org.tinystruct.app;
 import org.tinystruct.AbstractApplication;
 import org.tinystruct.ApplicationContext;
 import org.tinystruct.ApplicationException;
+import org.tinystruct.app.tools.DatabaseTool;
+import org.tinystruct.mcp.MCPClient;
+import org.tinystruct.mcp.MCPSpecification;
 import org.tinystruct.data.component.Builder;
 import org.tinystruct.data.component.Builders;
 import org.tinystruct.http.SSEPushManager;
-import org.tinystruct.mcp.MCPSpecification;
 import org.tinystruct.net.URLRequest;
 import org.tinystruct.net.URLResponse;
 import org.tinystruct.net.handlers.HTTPHandler;
@@ -14,14 +16,19 @@ import org.tinystruct.system.ApplicationManager;
 import org.tinystruct.system.Dispatcher;
 import org.tinystruct.system.annotation.Action;
 import org.tinystruct.system.annotation.Argument;
+import org.tinystruct.typesafe.client.HttpTypesafeClient;
+import org.tinystruct.typesafe.client.RoutingRequest;
+import org.tinystruct.typesafe.client.RoutingResult;
+import org.tinystruct.typesafe.core.config.RoutingSettings;
+import org.tinystruct.typesafe.core.config.TypesafeConfig;
 
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import org.tinystruct.mcp.MCPClient;
 
 /**
  * Agent application for autonomous coding tasks.
@@ -29,17 +36,24 @@ import org.tinystruct.mcp.MCPClient;
 public class SmartDBA extends AbstractApplication {
     private static final Logger logger = Logger.getLogger(SmartDBA.class.getName());
     private static final String DEFAULT_OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
-    private static final String DEFAULT_GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+    private static final String DEFAULT_MODEL = "gemini-3.5-flash-lite";
+    private static final String GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models/";
     private String apiKey;
     private String apiUrl;
+    private String model;
     private String skill;
+    /** Root that the model-driven read/write actions are confined to. */
+    private java.nio.file.Path workspace = java.nio.file.Paths.get(".").toAbsolutePath().normalize();
+    private RoutingSettings routingSettings;
     private MCPClient mcpClient;
     private static final String HISTORY_FILE = ".agent_history.json";
+    /** Cap on file content fed back to the model, so one large file can't flood the context window. */
+    private static final int MAX_READ_CHARS = 20000;
 
     private static final String SYSTEM_PROMPT = "You are SmartDBA, an autonomous database agent. You need display data as table style. You have access to the following MCP database tools:\n" +
             "- db/list-tables\n" +
             "- db/describe: requires param 'table'\n" +
-            "- db/query: requires params 'table', 'where', optional 'limit'\n" +
+            "- db/query: requires param 'table', and optional 'where' and 'limit' params\n" +
             "- db/insert: requires params 'table', 'data'\n" +
             "- db/update: requires params 'table', 'data', 'where'\n" +
             "- db/delete: requires params 'table', 'where'\n" +
@@ -86,9 +100,21 @@ public class SmartDBA extends AbstractApplication {
         this.setTemplateRequired(false);
         this.apiKey = this.getConfiguration().get("agent.api_key");
         this.apiUrl = this.getConfiguration().get("agent.api_url");
-        if (this.apiUrl == null || this.apiUrl.isEmpty()) {
-            this.apiUrl = DEFAULT_GEMINI_API_URL;
+        this.model = this.getConfiguration().get("agent.model");
+        if (this.model == null || this.model.isEmpty()) {
+            this.model = DEFAULT_MODEL;
         }
+        if (this.apiUrl == null || this.apiUrl.isEmpty()) {
+            String geminiModel = this.model.toLowerCase().contains("gemini") ? this.model : DEFAULT_MODEL;
+            this.apiUrl = GEMINI_MODELS_URL + geminiModel + ":generateContent";
+        }
+
+        String workspaceDir = this.getConfiguration().get("agent.workspace");
+        this.workspace = java.nio.file.Paths.get(workspaceDir == null || workspaceDir.isBlank() ? "." : workspaceDir)
+                .toAbsolutePath().normalize();
+
+        // Read TypeSafe routing settings (confirm-actions list, confidence thresholds, model)
+        this.routingSettings = RoutingSettings.from(this.getConfiguration());
 
         ApplicationManager.install(new Dispatcher());
         ApplicationManager.install(new SmartDBAServer());
@@ -114,14 +140,14 @@ public class SmartDBA extends AbstractApplication {
             }
         }
 
+        // Connect to the MCP server that SmartDBAServer exposes.
+        // The client connects lazily on first use because the HTTP server
+        // starts on a background thread after init() returns.
         String mcpUrl = this.getConfiguration().get("mcp.server.url");
         if (mcpUrl == null || mcpUrl.isEmpty()) {
             mcpUrl = "http://localhost:8080/";
         }
         String mcpToken = this.getConfiguration().get("mcp.auth.token");
-        // MCPClient is created here but NOT connected — the HTTP server
-        // starts on a background thread after init() returns, so connecting
-        // eagerly would always fail. The client connects lazily on first use.
         this.mcpClient = new MCPClient(mcpUrl, mcpToken);
     }
 
@@ -185,7 +211,14 @@ public class SmartDBA extends AbstractApplication {
             if (input.isEmpty()) continue;
 
             System.out.print("\n" + GREEN + BOLD + "Agent > " + RESET);
-            internalChat(input, true); // streams formatted markdown straight to stdout
+            try {
+                internalChat(input, true); // streams formatted markdown straight to stdout
+            } catch (ApplicationException e) {
+                // A failed request ends the turn, not the session. It is printed rather than
+                // logged because logging.enabled is FALSE by default, so a logged failure is
+                // one the user never hears about.
+                System.out.println(RED + "Request failed: " + e.getMessage() + RESET);
+            }
             System.out.println("\n");
         }
     }
@@ -196,13 +229,15 @@ public class SmartDBA extends AbstractApplication {
      * trailing ```json action block are buffered but never printed, since
      * that block is machine-readable tool-call instructions, not chat output.
      */
-    private final class StreamRenderer {
+    final class StreamRenderer { // package-private so its buffering can be tested directly
         private final StringBuilder pending = new StringBuilder();
         private final java.util.List<String> tableBuffer = new java.util.ArrayList<>();
         private boolean inFence = false;
         private boolean fenceIsJson = false;
         private String fenceLang = "";
         private int codeLineNum = 0;
+        private boolean rendered = false;
+        private boolean suppressedToolCall = false;
 
         void feed(String delta) {
             pending.append(delta);
@@ -214,18 +249,44 @@ public class SmartDBA extends AbstractApplication {
             }
         }
 
+        /**
+         * Flushes what the stream left behind, and is safe to call on a stream that died
+         * half-way — which is the point of calling it from a {@code finally}. A response's last
+         * line usually arrives with no trailing newline, so it is still sitting in {@code pending}
+         * when the stream ends; without this it would never be printed at all.
+         */
         void finish() {
             if (pending.length() > 0) {
                 processLine(pending.toString());
                 pending.setLength(0);
             }
             flushTable();
+            if (inFence && !fenceIsJson) {
+                System.out.println(CYAN + "└──" + RESET); // the stream ended inside a code block
+            }
+            inFence = false;
+            fenceIsJson = false;
             System.out.flush();
         }
 
+        /** {@code true} if nothing reached the screen, so the caller can say why instead of leaving a blank. */
+        boolean renderedNothing() {
+            return !rendered;
+        }
+
+        /** {@code true} if a tool-call block was swallowed — which is why the screen may be blank. */
+        boolean suppressedToolCall() {
+            return suppressedToolCall;
+        }
+
+        /**
+         * A Markdown table row, which has to start with a pipe. Accepting any line that merely
+         * contained a couple of pipes swallowed ordinary prose — "a | b", SQL using {@code ||}, a
+         * regex alternation — and re-rendered the sentence as a mangled table.
+         */
         private boolean looksLikeTableRow(String line) {
             String t = line.trim();
-            return t.startsWith("|") || (t.contains("|") && t.split("\\|", -1).length > 2);
+            return t.startsWith("|") && t.indexOf('|', 1) != -1;
         }
 
         private void processLine(String rawLine) {
@@ -243,11 +304,13 @@ public class SmartDBA extends AbstractApplication {
                     codeLineNum = 0;
                     if (!fenceIsJson) {
                         System.out.println(CYAN + "┌─ " + (fenceLang.isEmpty() ? "code" : fenceLang) + " " + RESET);
+                        rendered = true;
                     }
                 } else {
                     inFence = false;
                     if (!fenceIsJson) {
                         System.out.println(CYAN + "└──" + RESET);
+                        rendered = true;
                     }
                     fenceIsJson = false;
                 }
@@ -256,7 +319,8 @@ public class SmartDBA extends AbstractApplication {
 
             if (inFence) {
                 if (fenceIsJson) {
-                    return; // suppressed: tool-call payload, not shown to the user
+                    suppressedToolCall = true;
+                    return; // tool-call payload, not shown to the user
                 }
                 codeLineNum++;
                 if (fenceLang.equals("java")) {
@@ -264,6 +328,7 @@ public class SmartDBA extends AbstractApplication {
                 } else {
                     System.out.println(WHITE + line + RESET);
                 }
+                rendered = true;
                 return;
             }
 
@@ -276,11 +341,14 @@ public class SmartDBA extends AbstractApplication {
             }
             flushTable();
             System.out.println(renderMarkdownLine(line));
+            // Blank lines don't count: a reply made only of newlines still told the user nothing.
+            if (!line.isBlank()) rendered = true;
         }
 
         /** Renders all buffered table rows as one width-aligned box-drawn table. */
         private void flushTable() {
             if (tableBuffer.isEmpty()) return;
+            rendered = true;
 
             java.util.List<String[]> rows = new java.util.ArrayList<>();
             java.util.List<Boolean> separatorRow = new java.util.ArrayList<>();
@@ -433,6 +501,29 @@ public class SmartDBA extends AbstractApplication {
     }
 
     /**
+     * The outcome of one streaming call: either what the model said, or why it said nothing.
+     *
+     * <p>The two are separate kinds of thing, and conflating them was a bug. A failure returned as
+     * ordinary text was filed in the conversation as an assistant message, saved, and replayed as
+     * context on the next request — so the model was told it had once answered
+     * "API returned status 429".
+     */
+    record Completion(String text, String failure) { // package-private so it can be tested directly
+
+        static Completion spoken(String text) {
+            return new Completion(text == null ? "" : text, null);
+        }
+
+        static Completion failed(String reason) {
+            return new Completion("", reason);
+        }
+
+        boolean failed() {
+            return failure != null;
+        }
+    }
+
+    /**
      * @param message message from the user
      * @param cli      true when called from the interactive terminal session, in which
      *                 case the response is rendered as ANSI-formatted Markdown and
@@ -467,19 +558,35 @@ public class SmartDBA extends AbstractApplication {
             Builder payload = isGemini ? prepareGeminiPayload(history) : prepareOpenAIPayload(history);
 
             StreamRenderer renderer = cli ? new StreamRenderer() : null;
-            String responseText = callApiStreaming(payload, isGemini, delta -> {
-                if (renderer != null) {
-                    renderer.feed(delta);
-                }
-                if (sessionId != null) {
-                    Builder chunkMsg = new Builder();
-                    chunkMsg.put("status", "stream");
-                    chunkMsg.put("delta", delta);
-                    SSEPushManager.getInstance().push(sessionId, chunkMsg);
-                }
-            });
-            if (renderer != null) {
-                renderer.finish();
+            Completion completion;
+            try {
+                completion = callApiStreaming(payload, isGemini, delta -> {
+                    if (renderer != null) {
+                        renderer.feed(delta);
+                    }
+                    if (sessionId != null) {
+                        Builder chunkMsg = new Builder();
+                        chunkMsg.put("status", "stream");
+                        chunkMsg.put("delta", delta);
+                        SSEPushManager.getInstance().push(sessionId, chunkMsg);
+                    }
+                });
+            } finally {
+                // A stream that failed part-way still has buffered output to flush.
+                if (renderer != null) renderer.finish();
+            }
+
+            // A failure is not something the assistant said: show it, and leave the conversation
+            // as it was so the next request is not primed with our own error message.
+            if (completion.failed()) {
+                if (cli) System.out.println(RED + completion.failure() + RESET);
+                appendTo(finalResponse, completion.failure());
+                break;
+            }
+
+            String responseText = completion.text();
+            if (renderer != null && renderer.renderedNothing()) {
+                announceBlankTurn(renderer);
             }
 
             // Add assistant response to history
@@ -489,14 +596,10 @@ public class SmartDBA extends AbstractApplication {
             history.add(assistantMsg);
 
             // Process any actions requested by the AI
-            hasActions = processActions(responseText, history);
+            hasActions = processActions(responseText, history, cli);
             saveHistory(history);
 
-            String textWithoutJson = responseText.replaceAll("```json[\\s\\S]*?```", "").trim();
-            if (!textWithoutJson.isEmpty()) {
-                if (finalResponse.length() > 0) finalResponse.append("\n\n");
-                finalResponse.append(textWithoutJson);
-            }
+            appendTo(finalResponse, responseText.replaceAll("```json[\\s\\S]*?```", "").trim());
 
             if (hasActions && cli) {
                 System.out.print("\n" + CYAN + "Waiting for results..." + RESET + "\n");
@@ -512,13 +615,33 @@ public class SmartDBA extends AbstractApplication {
         return finalResponse.toString();
     }
 
+    /** Adds a paragraph to the reply being assembled across tool-calling rounds. */
+    private static void appendTo(StringBuilder reply, String paragraph) {
+        if (paragraph == null || paragraph.isEmpty()) return;
+        if (reply.length() > 0) reply.append("\n\n");
+        reply.append(paragraph);
+    }
+
+    /**
+     * Explains a turn that printed nothing, so the prompt never comes back bare.
+     *
+     * <p>Which kind of nothing it was comes from the renderer, which knows whether it suppressed
+     * a tool-call block — not from re-reading the response text and guessing.
+     */
+    private static void announceBlankTurn(StreamRenderer renderer) {
+        System.out.println(renderer.suppressedToolCall()
+                ? MAGENTA + "(tool call only — no message)" + RESET
+                : YELLOW + "(the model returned no text)" + RESET);
+    }
+
     /**
      * Performs a streaming POST request against the configured LLM API and invokes
      * {@code onDelta} with each incremental text fragment as it arrives over the
      * wire (Server-Sent Events for both the OpenAI-compatible and Gemini APIs).
-     * Returns the full concatenated response text once the stream completes.
+     *
+     * @return what the model said, or a {@link Completion#failed} carrying why it said nothing
      */
-    private String callApiStreaming(Builder payload, boolean isGemini, Consumer<String> onDelta) throws ApplicationException {
+    private Completion callApiStreaming(Builder payload, boolean isGemini, Consumer<String> onDelta) throws ApplicationException {
         try {
             URL url;
             if (isGemini) {
@@ -537,6 +660,7 @@ public class SmartDBA extends AbstractApplication {
 
             StringBuilder full = new StringBuilder();
             StringBuilder rawLines = new StringBuilder();
+            AtomicInteger unreadableChunks = new AtomicInteger();
 
             HTTPHandler handler = new HTTPHandler();
             // The consumer overload always streams: HTTPResponse reads the body
@@ -558,15 +682,35 @@ public class SmartDBA extends AbstractApplication {
                         onDelta.accept(delta);
                     }
                 } catch (Exception parseErr) {
+                    unreadableChunks.incrementAndGet();
                     logger.fine("Skipping unparsable stream chunk: " + parseErr.getMessage());
                 }
             });
 
             if (response.getStatusCode() != 200) {
-                throw new ApplicationException("API returned status " + response.getStatusCode() + "\n" + rawLines);
+                String errorMessage = "Unknown";
+                try {
+                    Builder errorBody = new Builder();
+                    errorBody.parse(rawLines.toString());
+                    Builder error = (Builder) errorBody.get("error");
+                    if (error != null && error.get("message") != null) {
+                        errorMessage = error.get("message").toString();
+                    }
+                } catch (Exception ignored) {
+                    // fall back to raw body if parsing fails
+                }
+                return Completion.failed("API returned status " + response.getStatusCode() + ": " + errorMessage);
             }
 
-            return full.toString();
+            // A 200 whose every chunk was unreadable is indistinguishable from an empty answer,
+            // and the skips are only logged — which says nothing while logging.enabled is FALSE.
+            if (full.length() == 0 && unreadableChunks.get() > 0) {
+                return Completion.failed("The response could not be read: " + unreadableChunks
+                        + " stream chunk(s) did not match the expected " + (isGemini ? "Gemini" : "OpenAI")
+                        + " format. Check that agent.api_url points at the right API.");
+            }
+
+            return Completion.spoken(full.toString());
         } catch (ApplicationException ae) {
             throw ae;
         } catch (MalformedURLException e) {
@@ -636,7 +780,7 @@ public class SmartDBA extends AbstractApplication {
 
     private Builder prepareOpenAIPayload(Builders history) {
         Builder payload = new Builder();
-        payload.put("model", "gpt-4-turbo-preview");
+        payload.put("model", this.model != null && !this.model.isEmpty() ? this.model : "gpt-4-turbo-preview");
         payload.put("stream", true);
 
         Builders messages = new Builders();
@@ -697,7 +841,127 @@ public class SmartDBA extends AbstractApplication {
         return payload;
     }
 
-    private boolean processActions(String responseText, Builders history) {
+    /**
+     * Asks the TypeSafe JEV model a single yes/no question: "Does this SQL statement modify or
+     * delete data?"  Used only for {@code db/execute}, where the tool name alone is insufficient
+     * to decide — the actual SQL content determines the risk.
+     *
+     * <p>All other tools use the static {@code typesafe.routing.confirm-actions} list defined
+     * in {@code application.properties}, which is read once into {@link #routingSettings}.
+     *
+     * @param sql the SQL statement the AI wants to execute
+     * @return {@code true} (requires approval) when JEV says yes or when the call fails
+     */
+    private boolean jevNeedsApproval(String sql) {
+        // Deterministic floor: anything not provably read-only needs approval, whatever JEV says
+        // (or whether a TypeSafe key is configured at all).
+        if (!DatabaseTool.isReadOnlySql(sql)) {
+            return true;
+        }
+        String typesafeApiKey = this.getConfiguration().get(TypesafeConfig.API_KEY);
+        if (typesafeApiKey == null || typesafeApiKey.isBlank()) {
+            typesafeApiKey = System.getenv("TYPESAFE_API_KEY");
+        }
+        if (typesafeApiKey == null || typesafeApiKey.isBlank()) {
+            return false; // already classified read-only above
+        }
+
+        try {
+            // Build a single noul ("yes/no") question using the TypeSafe /v1/systemone API
+            HttpTypesafeClient jevClient = new HttpTypesafeClient(
+                    this.getConfiguration().get(TypesafeConfig.ENDPOINT),
+                    typesafeApiKey,
+                    routingSettings.model(),
+                    5000, 30000, 2, 500);
+
+            Builder questions = new Builder();
+            Builder q = new Builder();
+            q.put("type", "noul");
+            q.put("question", "Does this SQL statement insert, update, delete, drop, truncate, alter, " +
+                    "create, grant, or revoke data or schema objects?");
+            questions.put("destructive_sql", q);
+
+            RoutingResult result = jevClient.classify(
+                    new RoutingRequest("SQL to execute: " + sql, questions, routingSettings.model()));
+            double yesProb = result.getNoul("destructive_sql");
+            logger.info(String.format("JEV noul(destructive_sql)=%.3f for SQL: %s", yesProb,
+                    sql.length() > 80 ? sql.substring(0, 80) + "..." : sql));
+            return yesProb >= 0.5;
+        } catch (Exception e) {
+            logger.warning("JEV noul check failed: " + e.getMessage() + " — defaulting to approval required");
+            return true;
+        }
+    }
+
+    /**
+     * Prompts the user for confirmation in the CLI.
+     *
+     * @return {@code true} if the user approved
+     */
+    private boolean requestApproval(String description, String reason) {
+        System.out.println("\n" + YELLOW + BOLD + "[Approval required] " + RESET + description);
+        if (reason != null && !reason.isEmpty()) {
+            System.out.println(CYAN + "  Reason: " + reason + RESET);
+        }
+        System.out.print(YELLOW + "Proceed? [y/N]: " + RESET);
+        System.out.flush();
+        try {
+            java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(System.in));
+            String answer = reader.readLine();
+            return answer != null && (answer.trim().equalsIgnoreCase("y") || answer.trim().equalsIgnoreCase("yes"));
+        } catch (java.io.IOException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Gate for every action that needs sign-off. Only the interactive terminal has a human to ask,
+     * so anywhere else (the HTTP {@code chat} action, SSE clients) the answer is a flat no: the
+     * model's output is untrusted input and must not be able to write, run or modify on its own.
+     */
+    private boolean authorize(boolean cli, String description, String reason) {
+        if (!cli) {
+            logger.warning("Refused (no interactive approver available): " + description);
+            return false;
+        }
+        return requestApproval(description, reason);
+    }
+
+    /** Records a refusal in the conversation so the model knows the action did not happen. */
+    private void denyAction(Builders history, String description, boolean cli) {
+        if (cli) System.out.println(RED + "[Approval] Denied: " + description + RESET);
+        Builder denied = new Builder();
+        denied.put("role", "user");
+        denied.put("content", "Action denied" + (cli ? " by user" : " (approval is only available in the interactive terminal)")
+                + ": " + description);
+        history.add(denied);
+    }
+
+    /**
+     * Resolves a model-supplied path inside the workspace, refusing anything that escapes it
+     * (absolute paths elsewhere, {@code ..}, symlinks) and the files that hold secrets or history.
+     */
+    private java.nio.file.Path resolveInWorkspace(String path) throws ApplicationException {
+        try {
+            java.nio.file.Path root = workspace.toRealPath();
+            java.nio.file.Path target = root.resolve(path).normalize();
+            // Resolve symlinks on the deepest existing ancestor so a link cannot point outside.
+            java.nio.file.Path probe = target;
+            while (probe != null && !java.nio.file.Files.exists(probe)) probe = probe.getParent();
+            if (probe == null || !probe.toRealPath().startsWith(root)) {
+                throw new ApplicationException("Path is outside the workspace: " + path);
+            }
+            String name = target.getFileName() == null ? "" : target.getFileName().toString();
+            if (name.equals("application.properties") || name.equals(HISTORY_FILE)) {
+                throw new ApplicationException("Access to " + name + " is not allowed.");
+            }
+            return target;
+        } catch (java.io.IOException e) {
+            throw new ApplicationException("Cannot resolve path: " + path, e);
+        }
+    }
+
+    private boolean processActions(String responseText, Builders history, boolean cli) {
         boolean executedAny = false;
         if (responseText.contains("```json")) {
             try {
@@ -713,32 +977,105 @@ public class SmartDBA extends AbstractApplication {
 
                     try {
                         switch (type) {
-                            case "write":
-                                this.write(action.get("path").toString(), action.get("content").toString());
+                            case "write": {
+                                String path = action.get("path").toString();
+                                String desc = "write to file: " + path;
+                                // write is always destructive
+                                if (!authorize(cli, desc, "File writes are irreversible.")) {
+                                    denyAction(history, desc, cli);
+                                    executedAny = true;
+                                    break;
+                                }
+                                this.write(path, action.get("content").toString());
                                 break;
-                            case "read":
-                                this.read(action.get("path").toString());
+                            }
+                            case "read": {
+                                String path = action.get("path").toString();
+                                String content;
+                                try {
+                                    content = this.read(path);
+                                } catch (ApplicationException e) {
+                                    // Tell the model why, rather than leaving it waiting on a result.
+                                    content = "Error: " + e.getMessage();
+                                }
+                                if (content.length() > MAX_READ_CHARS) {
+                                    content = content.substring(0, MAX_READ_CHARS)
+                                            + "\n...[truncated, file has " + content.length() + " characters]";
+                                }
+                                if (cli) System.out.println("\n" + MAGENTA + BOLD + "[System] Read file: " + RESET + CYAN + path + RESET);
+                                Builder readMsg = new Builder();
+                                readMsg.put("role", "user");
+                                readMsg.put("content", "File " + path + " contents:\n" + content);
+                                history.add(readMsg);
+                                executedAny = true;
                                 break;
-                            case "exec":
-                                this.execute(action.get("cmd").toString());
+                            }
+                            case "exec": {
+                                String cmd = action.get("cmd").toString();
+                                String desc = "exec: " + cmd;
+                                // shell exec always requires approval
+                                if (!authorize(cli, desc, "Shell commands can have side-effects.")) {
+                                    denyAction(history, desc, cli);
+                                    executedAny = true;
+                                    break;
+                                }
+                                this.execute(cmd);
                                 break;
-                            case "mcp":
+                            }
+                            case "mcp": {
                                 String toolName = action.get("tool").toString();
                                 Builder params = action.get("params") != null ? (Builder) action.get("params") : new Builder();
-                                System.out.println("\n" + MAGENTA + BOLD + "[System] Executing MCP tool: " + RESET + CYAN + toolName + RESET + " with params: " + YELLOW + params.toString() + RESET);
+                                String desc = "MCP tool '" + toolName + "' with params: " + params;
+
+                                // Tier 1: static confirm-actions list from typesafe.routing.confirm-actions
+                                boolean needsApproval = routingSettings.confirmActions().contains(toolName);
+
+                                // Tier 2: for db/execute, ask JEV semantically whether the SQL is destructive
+                                if (!needsApproval && "db/execute".equals(toolName)) {
+                                    Object sqlObj = params.get("sql");
+                                    String sql = sqlObj != null ? sqlObj.toString() : "";
+                                    needsApproval = jevNeedsApproval(sql);
+                                }
+
+                                if (needsApproval && !authorize(cli, desc,
+                                        "db/execute".equals(toolName)
+                                                ? "This SQL is not provably read-only (or JEV flagged it as modifying data)."
+                                                : "This operation is listed in typesafe.routing.confirm-actions.")) {
+                                    denyAction(history, desc, cli);
+                                    executedAny = true;
+                                    break;
+                                }
+
+                                if (cli) System.out.println("\n" + MAGENTA + BOLD + "[System] Executing MCP tool: " + RESET + CYAN + toolName + RESET + " with params: " + YELLOW + params.toString() + RESET);
+
+                                // Connect lazily — the HTTP server starts on a background thread
                                 MCPSpecification.SessionState state = this.mcpClient.getSessionState();
                                 if (state == null
                                         || state == MCPSpecification.SessionState.ERROR
                                         || state == MCPSpecification.SessionState.DISCONNECTED) {
                                     this.mcpClient.connect();
                                 }
-                                Object mcpResult = this.mcpClient.callTool(toolName, params);
 
+                                Object toolResult;
+                                try {
+                                    toolResult = this.mcpClient.callTool(toolName, params);
+                                } catch (Exception ex) {
+                                    logger.log(Level.SEVERE, "MCP tool call failed: " + toolName, ex);
+                                    Builder errMsg = new Builder();
+                                    errMsg.put("role", "user");
+                                    errMsg.put("content", "MCP tool " + toolName + " failed: " + ex.getMessage());
+                                    history.add(errMsg);
+                                    executedAny = true;
+                                    break;
+                                }
+
+                                String rawResult = toolResult != null ? toolResult.toString() : "null";
+                                // mcpResult is what the old code called it — keep naming consistent
                                 String formattedResult;
-                                if (mcpResult != null && mcpResult.toString().startsWith("{")) {
+                                if (rawResult.startsWith("{")) {
                                     try {
                                         Builder resultObj = new Builder();
-                                        resultObj.parse(mcpResult.toString());
+                                        resultObj.parse(rawResult);
                                         if (resultObj.get("tables") instanceof Builders) {
                                             formattedResult = formatAsTable((Builders) resultObj.get("tables"));
                                         } else if (resultObj.get("rows") instanceof Builders) {
@@ -746,18 +1083,20 @@ public class SmartDBA extends AbstractApplication {
                                         } else if (resultObj.get("columns") instanceof Builders) {
                                             formattedResult = formatAsTable((Builders) resultObj.get("columns"));
                                         } else {
-                                            formattedResult = mcpResult.toString();
+                                            formattedResult = rawResult;
                                         }
                                     } catch (Exception e) {
-                                        formattedResult = mcpResult.toString();
+                                        formattedResult = rawResult;
                                     }
                                 } else {
-                                    formattedResult = String.valueOf(mcpResult);
+                                    formattedResult = rawResult;
                                 }
 
-                                System.out.println(MAGENTA + BOLD + "[System] MCP Tool result:" + RESET);
-                                System.out.println(GREEN + formattedResult + RESET + "\n");
-                                push("MCP Tool " + toolName + " executed. Result: " + mcpResult);
+                                if (cli) {
+                                    System.out.println(MAGENTA + BOLD + "[System] MCP Tool result:" + RESET);
+                                    System.out.println(GREEN + formattedResult + RESET + "\n");
+                                }
+                                push("MCP Tool " + toolName + " executed. Result: " + rawResult);
 
                                 Builder toolResultMsg = new Builder();
                                 toolResultMsg.put("role", "user");
@@ -765,6 +1104,7 @@ public class SmartDBA extends AbstractApplication {
                                 history.add(toolResultMsg);
                                 executedAny = true;
                                 break;
+                            }
                             default:
                                 logger.warning("Unknown action type: " + type);
                         }
@@ -860,12 +1200,12 @@ public class SmartDBA extends AbstractApplication {
         return result != null ? result.toString() : "Success";
     }
 
-    @Action(value = "read", description = "Read a file", options = {
+    @Action(value = "read", description = "Read a file inside the workspace", options = {
             @Argument(key = "path", description = "File path")
-    })
+    }, mode = Action.Mode.CLI)
     public String read(String path) throws ApplicationException {
         try {
-            java.nio.file.Path filePath = java.nio.file.Paths.get(path);
+            java.nio.file.Path filePath = resolveInWorkspace(path);
             if (!java.nio.file.Files.exists(filePath)) {
                 return "Error: File does not exist: " + path;
             }
@@ -875,13 +1215,13 @@ public class SmartDBA extends AbstractApplication {
         }
     }
 
-    @Action(value = "write", description = "Write content to a file", options = {
+    @Action(value = "write", description = "Write content to a file inside the workspace", options = {
             @Argument(key = "path", description = "File path"),
             @Argument(key = "content", description = "Content to write")
-    })
+    }, mode = Action.Mode.CLI)
     public String write(String path, String content) throws ApplicationException {
         try {
-            java.nio.file.Path filePath = java.nio.file.Paths.get(path);
+            java.nio.file.Path filePath = resolveInWorkspace(path);
             java.nio.file.Path parent = filePath.getParent();
             if (parent != null && !java.nio.file.Files.exists(parent)) {
                 java.nio.file.Files.createDirectories(parent);
