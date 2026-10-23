@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="../README.md">English</a> | <a href="README_zh.md">简体中文</a>
+  <a href="../README.md">English</a> | <a href="README_zh.md">简体中文</a> | <a href="README_ja.md">日本語</a>
 </p>
 
 # SmartDBA - AI 数据库智能代理
